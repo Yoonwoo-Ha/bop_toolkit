@@ -34,11 +34,18 @@ def create_annotation_info(
     annotation_id,
     image_id,
     object_id,
-    binary_mask,
-    bounding_box,
+    binary_mask=None,
+    *args,
+    bounding_box=None,
     mask_encoding_format="rle",
     tolerance=2,
     ignore=None,
+    binary_mask_visib=None,
+    binary_mask_full=None,
+    poses=None,
+    visibility=None,
+    cam_K=None,
+    depth_scale=None,
 ):
     """Creates info section of coco annotation
 
@@ -50,8 +57,58 @@ def create_annotation_info(
     :param mask_encoding_format: Encoding format of the mask. Type: string.
     :param tolerance: The tolerance for fitting polygons to the objects mask.
     :param ignore: whether to ignore this gt annotation during evaluation (also matched detections with IoU>thres)
+    :param binary_mask_full: Optional full silhouette, stored as full_segmentation.
+    :param poses: Optional [tx, ty, tz, R00, ..., R22], translation in BOP units (mm).
+    :param visibility: Optional BOP visible fraction.
+    :param cam_K: Optional flattened 3x3 camera matrix.
+    :param depth_scale: Optional raw-depth-to-mm scale from scene_camera.json.
     :return: Dict containing coco annotations infos of an instance.
+
+    The upstream (mask, bbox, [encoding, tolerance, ignore]) API, including its
+    keyword names, is preserved. Older RACE6D callers may additionally pass
+    (visible_mask, full_mask, bbox, poses, ...) or (visible_mask, bbox, poses, ...).
+    Rich fields are added only when requested; ordinary COCO callers keep their
+    original annotation schema. ``binary_mask_visib`` is a legacy keyword alias.
     """
+
+    if binary_mask_visib is not None:
+        if binary_mask is not None:
+            raise TypeError("Specify binary_mask or binary_mask_visib, not both")
+        binary_mask = binary_mask_visib
+    if binary_mask is None:
+        raise TypeError("binary_mask is required")
+
+    positional = list(args)
+    if positional and np.ndim(positional[0]) == 2:
+        if binary_mask_full is not None:
+            raise TypeError("Multiple values for binary_mask_full")
+        binary_mask_full = positional.pop(0)
+    if positional:
+        if bounding_box is not None:
+            raise TypeError("Multiple values for bounding_box")
+        bounding_box = positional.pop(0)
+    if positional and not isinstance(positional[0], str):
+        candidate = np.asarray(positional[0])
+        if candidate.ndim != 1 or candidate.size != 12:
+            raise TypeError("Legacy positional poses must contain 12 values")
+        if poses is not None:
+            raise TypeError("Multiple values for poses")
+        poses = positional.pop(0)
+    if len(positional) > 3:
+        raise TypeError("Too many positional annotation arguments")
+    if positional:
+        mask_encoding_format = positional.pop(0)
+    if positional:
+        tolerance = positional.pop(0)
+    if positional:
+        ignore = positional.pop(0)
+    if bounding_box is None:
+        raise TypeError("bounding_box is required")
+
+    rich = any(value is not None for value in
+               (binary_mask_full, poses, visibility, cam_K, depth_scale))
+    if rich and binary_mask_full is None:
+        binary_mask_full = binary_mask
 
     area = binary_mask.sum()
     if area < 1:
@@ -79,6 +136,23 @@ def create_annotation_info(
     }
     if ignore is not None:
         annotation_info["ignore"] = ignore
+
+    if rich:
+        if binary_mask_full.shape != binary_mask.shape:
+            raise ValueError("Visible and full masks must have the same shape")
+        if mask_encoding_format == "rle":
+            full_segmentation = binary_mask_to_rle(binary_mask_full)
+        else:
+            full_segmentation = binary_mask_to_polygon(binary_mask_full, tolerance)
+        annotation_info.update({
+            "full_segmentation": full_segmentation,
+            "width_full": binary_mask_full.shape[1],
+            "height_full": binary_mask_full.shape[0],
+        })
+    for key, value in (("pose", poses), ("visibility", visibility),
+                       ("cam_K", cam_K), ("depth_scale", depth_scale)):
+        if value is not None:
+            annotation_info[key] = value.tolist() if isinstance(value, np.ndarray) else value
 
     return annotation_info
 

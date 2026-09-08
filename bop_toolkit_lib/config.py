@@ -9,15 +9,16 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 LIB_DIR = ROOT_DIR / "bop_toolkit_lib"
 DATA_DIR = ROOT_DIR / "data"
+DOWNLOADS_DIR = Path.home() / "Downloads"
 
 # You may change default values here or 
 # set the corresponding environment variable.
 default_paths = {
-    "BOP_PATH": str(DATA_DIR),
+    "BOP_PATH": str(DOWNLOADS_DIR),
     "BOP_RESULTS_PATH": rf"{ROOT_DIR}/results",
     "BOP_EVAL_PATH": rf"{ROOT_DIR}/results",
     "BOP_OUTPUT_PATH": rf"{ROOT_DIR}/outputs",
-    "BOP_RENDERER_PATH": rf"{ROOT_DIR}/bop_renderer/build",
+    "BOP_RENDERER_PATH": str(DOWNLOADS_DIR / "bop_renderer" / "build"),
     "BOP_MESHLAB_PATH": r"/path/to/meshlabserver.exe",
     "BOP_NUM_WORKERS": "10",
 }

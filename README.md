@@ -1,5 +1,9 @@
 # BOP Toolkit
 
+RACE-6D users: see [RACE-6D data preparation](README_RACE6D.md) for the extended
+COCO exporter, `~/Downloads/<dataset>` defaults, keypoint-cache prerequisites,
+and C++ renderer setup.
+
 A Python toolkit of the BOP benchmark for 6D object pose estimation
 (http://bop.felk.cvut.cz).
 
