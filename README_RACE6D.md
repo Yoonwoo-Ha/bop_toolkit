@@ -25,6 +25,10 @@ The printed module must belong to this checkout. Use the same environment for
 the scripts and their imported package. An older installed Toolkit can have a
 different renderer module layout.
 
+Dataset archives and the C++ renderer are installed separately. The COCO
+exporter reads existing GT and mask files, so it can run without a renderer.
+The C++ renderer is needed when evaluating VSD with `--renderer_type cpp`.
+
 If reusing system packages with `venv --system-site-packages`, an existing
 Toolkit installation can take precedence over an editable import hook. Use
 `python -m pip install --no-deps -e . --config-settings editable_mode=strict`
@@ -123,6 +127,16 @@ for an output whose images do not depend on the source files remaining in place.
 Image extensions match their actual encoding. Depth export creates the sibling
 `train2017_depth/` or `val2017_depth/` directory expected by RACE-6D.
 
+The full train/test commands above export RGB images by default. For RGB-D,
+add `--include_depth` to both commands and use a RACE-6D RGB-D configuration
+with `return_depth: True` for both datasets. A previously generated RGB-only
+output must be regenerated at a new `--output_dir` to include depth; update
+the corresponding RACE-6D paths to that new output.
+
+After a successful run, `conversion_summary.json` in the output directory
+records the exported image/annotation counts and paths. To see all options,
+run `python scripts/prepare_race6d_coco.py --help`.
+
 Existing output directories are rejected. A conversion is built in a temporary
 sibling directory and published only after it succeeds. Scene/image ordering and
 identifiers are deterministic across worker counts; annotations are streamed so
@@ -159,12 +173,55 @@ Set `coco_path` to `~/Downloads/lmo/` and the train/validation `img_folder` and
 `ann_file` values to the output paths above. Update dataset-level `coco_path`
 entries too when using another root.
 
+For example, apply these fields to the existing
+`configs/race6d/r50vd/race6d_r50vd_lmo_rgb.yml` in your RACE-6D checkout:
+
+```yaml
+coco_path: ~/Downloads/lmo/
+category_file: ./configs/race6d/include/lmo2coco_category.yml
+
+train_dataloader:
+  dataset:
+    img_folder: ~/Downloads/lmo/lmo2coco_train_pbr_amodal/train2017/
+    ann_file: ~/Downloads/lmo/lmo2coco_train_pbr_amodal/annotations/instances_train2017.json
+    coco_path: ~/Downloads/lmo/
+    category_file: ./configs/race6d/include/lmo2coco_category.yml
+    return_depth: False
+
+val_dataloader:
+  dataset:
+    img_folder: ~/Downloads/lmo/lmo2coco_test_eval_amodal/val2017/
+    ann_file: ~/Downloads/lmo/lmo2coco_test_eval_amodal/annotations/instances_val2017.json
+    coco_path: ~/Downloads/lmo/
+    category_file: ./configs/race6d/include/lmo2coco_category.yml
+    return_depth: False
+```
+
+These are the data-related fields of the existing model configuration; retain
+its includes, transforms, model, and optimizer settings. Launch RACE-6D from
+its own checkout so relative category-file paths resolve there. For another
+dataset, use its existing configuration and matching category YAML. If a
+configuration combines multiple training datasets, update each dataset entry.
+
 RACE-6D also requires `models/` and `cached_keypoints_3d_edge.json` under
 `coco_path`. The COCO converter does not generate the 32 object keypoints.
 The existing generator is in RACE-6D's `sub/test_kpt.ipynb`, which reads
 `models_eval/` and saves the separate keypoint/edge cache. Enable its save call
 when generating a new cache; the model does not create a missing cache
 automatically. Keep an existing validated cache when reproducing a checkpoint.
+
+In that notebook, use the setup for the intended dataset and check `PLY_DIR`
+(`~/Downloads/<dataset>/models_eval`), `OUTPUT_JSON`
+(`~/Downloads/<dataset>/cached_keypoints_3d_edge.json`), and `OBJ_IDS`, together
+with that dataset's `SPLIT_CONFIG` and `EDGE_OVERRIDE`. After the function
+definitions and the dataset setup have run, enable and execute:
+
+```python
+saved_path = save_keypoints_to_json(PLY_DIR, OUTPUT_JSON, OBJ_IDS)
+```
+
+The notebook contains several dataset setups. Execute the one for your dataset
+and confirm the cache was saved at its `OUTPUT_JSON` before starting training.
 Per-instance 2D keypoints are projected from the cache and GT pose during
 training, so they do not need to be embedded in the COCO annotation.
 
@@ -193,3 +250,6 @@ it; its existing `tools/bop_toolkit` copy does not update automatically.
 
 See [validation results](docs/RACE6D_VALIDATION.md) for the actual-data checks,
 LMO annotation comparison, package-install checks, and BOP score regression.
+Verification covered the complete LMO test split and PBR samples from six other
+datasets. Full training-set conversion and model training were not run;
+the local machine did not have the original `lmo/train_pbr` split.
