@@ -18,6 +18,10 @@ import numpy as np
 from PIL import Image
 
 from bop_toolkit_lib import config, dataset_params, inout, pycoco_utils
+from bop_toolkit_lib.race6d_rotations import (
+    DEFAULT_MAX_CHANGE, DEFAULT_TOLERANCE, file_sha256, prepare_rotation,
+    rotation_metrics, validate_rotation_options,
+)
 
 
 def _json_line(handle, value):
@@ -84,18 +88,21 @@ def _process_scene(job):
     """Worker entry point; return counts/paths, never full annotations."""
     paths = job["paths"]
     scene_id = job["scene_id"]
-    scene_gt = inout.load_scene_gt(paths["scene_gt_tpath"])
+    scene_gt = inout.load_json(paths["scene_gt_tpath"], keys_to_int=True)
     scene_info = inout.load_json(paths["scene_gt_info_tpath"], keys_to_int=True)
     scene_camera = inout.load_json(paths["scene_camera_tpath"], keys_to_int=True)
     spool = Path(job["staging"]) / ".spool"
     image_spool = spool / "{:06d}.images.jsonl".format(scene_id)
     annotation_spool = spool / "{:06d}.annotations.jsonl".format(scene_id)
+    rotation_spool = spool / "{:06d}.rotations.jsonl".format(scene_id)
     image_root = Path(job["staging"]) / job["coco_split"]
     depth_root = Path(job["staging"]) / (job["coco_split"] + "_depth")
     annotation_count = 0
     skipped_instances = 0
+    rotation_audit = {"checked": 0, "normalized": 0, "max_entry_change": 0.0,
+                      "max_source_orthogonality_error": 0.0}
 
-    with image_spool.open("w") as images_out, annotation_spool.open("w") as annotations_out:
+    with image_spool.open("w") as images_out, annotation_spool.open("w") as annotations_out, rotation_spool.open("w") as rotations_out:
         for offset, im_id in enumerate(job["image_ids"]):
             image_id = job["image_start"] + offset
             instances = scene_gt[im_id]
@@ -108,6 +115,12 @@ def _process_scene(job):
             cam_k = np.asarray(camera.get("cam_K", []), dtype=float).reshape(-1)
             if cam_k.size != 9 or not np.isfinite(cam_k).all():
                 raise ValueError("Scene {} image {} requires a finite pinhole cam_K (9 values)".format(scene_id, im_id))
+            matrix = cam_k.reshape(3, 3)
+            if (matrix[0, 0] <= 0 or matrix[1, 1] <= 0
+                    or not np.allclose(matrix[2], [0, 0, 1], atol=1e-8, rtol=0)):
+                raise ValueError("Scene {} image {} has invalid pinhole cam_K: positive fx/fy and bottom row [0,0,1] required".format(scene_id, im_id))
+            # Keep the actual per-image K. Different train/test cameras and
+            # cropped principal points are legitimate, not normalization errors.
             depth_scale = float(camera.get("depth_scale", 1.0))
             if not np.isfinite(depth_scale) or depth_scale <= 0:
                 raise ValueError("Scene {} image {} has invalid depth_scale".format(scene_id, im_id))
@@ -158,8 +171,19 @@ def _process_scene(job):
                     continue
                 bbox_mask = full if job["bbox_type"] == "amodal" else visible
                 bbox = pycoco_utils.bbox_from_binary_mask(bbox_mask)
-                pose = np.concatenate((instance["cam_t_m2c"].reshape(-1),
-                                       instance["cam_R_m2c"].reshape(-1))).tolist()
+                rotation = np.asarray(instance["cam_R_m2c"], dtype=np.float64)
+                metrics, changed = None, False
+                if job["rotation_mode"] != "preserve":
+                    try:
+                        rotation, metrics, changed = prepare_rotation(
+                            rotation, job["rotation_mode"], job["rotation_tolerance"],
+                            job["rotation_max_change"])
+                    except (ValueError, TypeError, np.linalg.LinAlgError) as error:
+                        raise ValueError("{}: image {} GT {} object {}: {}".format(
+                            paths["scene_gt_tpath"], im_id, gt_id, obj_id, error)) from error
+                rotation = rotation.reshape(3, 3)
+                translation = np.asarray(instance["cam_t_m2c"], dtype=np.float64).reshape(3)
+                pose = np.concatenate((translation, rotation.reshape(-1))).tolist()
                 annotation = pycoco_utils.create_annotation_info(
                     annotation_count + 1, image_id, obj_id,
                     binary_mask=visible, bounding_box=bbox,
@@ -169,10 +193,33 @@ def _process_scene(job):
                 )
                 if annotation is not None:
                     _json_line(annotations_out, annotation)
+                    if metrics is not None:
+                        rotation_audit["checked"] += 1
+                        rotation_audit["max_source_orthogonality_error"] = max(
+                            rotation_audit["max_source_orthogonality_error"], metrics["orthogonality_error"])
+                    if changed:
+                        change = float(np.max(np.abs(rotation.reshape(-1)
+                                                     - np.asarray(instance["cam_R_m2c"]).reshape(-1))))
+                        rotation_audit["normalized"] += 1
+                        rotation_audit["max_entry_change"] = max(rotation_audit["max_entry_change"], change)
+                        _json_line(rotations_out, {
+                            "scene_id": scene_id, "bop_im_id": im_id, "gt_id": gt_id,
+                            "obj_id": obj_id, "image_id": image_id,
+                            "original_rotation": instance["cam_R_m2c"],
+                            "normalized_rotation": rotation.reshape(-1).tolist(),
+                            "max_entry_change": change, "source_metrics": metrics,
+                            "normalized_metrics": rotation_metrics(rotation, job["rotation_tolerance"]),
+                        })
                     annotation_count += 1
-    return {"scene_id": scene_id, "images": len(job["image_ids"]),
-            "annotations": annotation_count, "skipped_instances": skipped_instances,
-            "image_spool": str(image_spool), "annotation_spool": str(annotation_spool)}
+    result = {"scene_id": scene_id, "images": len(job["image_ids"]),
+              "annotations": annotation_count, "skipped_instances": skipped_instances,
+              "image_spool": str(image_spool), "annotation_spool": str(annotation_spool),
+              "rotation_spool": str(rotation_spool), "rotation_audit": rotation_audit}
+    if job["rotation_mode"] != "preserve":
+        result["rotation_source"] = {"scene_id": scene_id,
+                                     "path": str(Path(paths["scene_gt_tpath"]).resolve()),
+                                     "sha256": file_sha256(paths["scene_gt_tpath"])}
+    return result
 
 
 def _merge_spools(path, metadata, results):
@@ -204,16 +251,24 @@ def _merge_spools(path, metadata, results):
 
 def prepare_dataset(dataset="lmo", dataset_split="test", dataset_split_type=None,
                     datasets_path=None, bbox_type="amodal", output_dir=None,
-                    targets_filename="test_targets_bop19.json", use_all_gt=False,
+                    targets_filename=None, use_all_gt=False,
                     scene_ids=None, image_ids=None, max_images=None,
-                    num_workers=1, image_mode="symlink", include_depth=False):
+                    num_workers=1, image_mode="symlink", include_depth=False,
+                    rotation_mode="preserve", rotation_tolerance=DEFAULT_TOLERANCE,
+                    rotation_max_change=DEFAULT_MAX_CHANGE):
     """Convert selected BOP images and return paths/counts for the finished split.
 
     ``dataset_split_type=None`` means PBR for train and the official Toolkit
     default sensor/type for test/val. Use ``"none"`` for an unsuffixed train split.
-    Test/val use the target image list; train always uses all available GT images.
+    Test uses the target image list (``test_targets_bop19.json`` by default). Val
+    uses all GT images unless ``targets_filename`` is given: BOP val splits have
+    no target list, and they are the annotated split for datasets whose test GT
+    is not public (HB, ITODD). Train always uses all available GT images.
     ``image_ids`` filters original BOP image IDs in every selected scene.
     Existing output directories are always refused, including empty directories.
+    Rotation checks apply to exported annotations, not empty/excluded instances.
+    ``normalize`` projects only slightly invalid rotations in the new output;
+    source GT is never rewritten. Default ``preserve`` keeps historical behavior.
     """
     if bbox_type not in ("modal", "amodal"):
         raise ValueError("bbox_type must be modal or amodal")
@@ -221,6 +276,7 @@ def prepare_dataset(dataset="lmo", dataset_split="test", dataset_split_type=None
         raise ValueError("image_mode must be symlink or copy")
     if num_workers < 0 or (max_images is not None and max_images < 1):
         raise ValueError("num_workers must be nonnegative and max_images positive")
+    validate_rotation_options(rotation_mode, rotation_tolerance, rotation_max_change)
     root = Path(datasets_path or config.datasets_path).expanduser().resolve()
     split_type = dataset_split_type
     if split_type is None and dataset_split == "train":
@@ -239,7 +295,9 @@ def prepare_dataset(dataset="lmo", dataset_split="test", dataset_split_type=None
     if not isinstance(dp_split["im_modalities"], list):
         raise ValueError("RACE6D conversion currently supports classic BOP datasets with pinhole cameras; {} needs a dedicated sensor/camera conversion".format(dataset))
 
-    all_gt = use_all_gt or dataset_split == "train"
+    if targets_filename is None and dataset_split == "test":
+        targets_filename = "test_targets_bop19.json"
+    all_gt = use_all_gt or dataset_split == "train" or targets_filename is None
     targets = None
     if not all_gt:
         target_path = Path(targets_filename).expanduser()
@@ -292,7 +350,9 @@ def prepare_dataset(dataset="lmo", dataset_split="test", dataset_split_type=None
             jobs.append({"scene_id": scene_id, "paths": paths, "image_ids": ids,
                          "image_start": total_images, "bbox_type": bbox_type,
                          "obj_ids": set(dp_model["obj_ids"]), "coco_split": coco_split,
-                         "image_mode": image_mode, "include_depth": include_depth})
+                         "image_mode": image_mode, "include_depth": include_depth,
+                         "rotation_mode": rotation_mode, "rotation_tolerance": rotation_tolerance,
+                         "rotation_max_change": rotation_max_change})
             total_images += len(ids)
         if max_images is not None and total_images >= max_images:
             break
@@ -331,6 +391,11 @@ def prepare_dataset(dataset="lmo", dataset_split="test", dataset_split_type=None
         }
         annotation_name = "instances_{}.json".format(coco_split)
         _merge_spools(staging / "annotations" / annotation_name, metadata, results)
+        if rotation_mode != "preserve":
+            with (staging / "rotation_changes.jsonl").open("w") as changes:
+                for result in results:
+                    with Path(result["rotation_spool"]).open() as source:
+                        shutil.copyfileobj(source, changes)
         shutil.rmtree(staging / ".spool")
         summary = {
             "output_dir": str(output), "image_dir": str(output / coco_split),
@@ -340,6 +405,19 @@ def prepare_dataset(dataset="lmo", dataset_split="test", dataset_split_type=None
             "skipped_empty_instances": sum(result["skipped_instances"] for result in results),
             "image_mode": image_mode,
         }
+        summary["rotations"] = {
+            "mode": rotation_mode, "tolerance": rotation_tolerance,
+            "max_allowed_entry_change": rotation_max_change,
+            "scope": "exported_annotations_only",
+            "checked": sum(r["rotation_audit"]["checked"] for r in results),
+            "normalized": sum(r["rotation_audit"]["normalized"] for r in results),
+            "max_entry_change": max(r["rotation_audit"]["max_entry_change"] for r in results),
+            "max_source_orthogonality_error": max(
+                r["rotation_audit"]["max_source_orthogonality_error"] for r in results),
+        }
+        if rotation_mode != "preserve":
+            summary["rotations"]["changes_file"] = str(output / "rotation_changes.jsonl")
+            summary["rotations"]["sources"] = [r["rotation_source"] for r in results]
         if include_depth:
             summary["depth_dir"] = str(output / (coco_split + "_depth"))
         with (staging / "conversion_summary.json").open("w") as handle:
@@ -371,14 +449,19 @@ def main(argv=None):
     parser.add_argument("--datasets_path", default=config.datasets_path, help="Parent of dataset folders (default: BOP_PATH or ~/Downloads)")
     parser.add_argument("--bbox_type", choices=("modal", "amodal"), default="amodal")
     parser.add_argument("--output_dir", help="New output directory; an existing path is never overwritten")
-    parser.add_argument("--targets_filename", default="test_targets_bop19.json")
-    parser.add_argument("--use_all_gt", action="store_true", help="Use all GT images instead of evaluation targets (always enabled for train)")
+    parser.add_argument("--targets_filename", help="Image list relative to the dataset folder (default: test_targets_bop19.json for test; val uses all GT images)")
+    parser.add_argument("--use_all_gt", action="store_true", help="Use all GT images instead of evaluation targets (default for train and val)")
     parser.add_argument("--scene_ids", nargs="+", help="Original BOP scene IDs, space/comma separated")
     parser.add_argument("--image_ids", nargs="+", help="Original BOP image IDs in each scene, space/comma separated")
     parser.add_argument("--max_images", "--max-images", type=int, help="Maximum images across all selected scenes")
     parser.add_argument("--num_workers", type=int, default=1, help="Parallel scene workers; 0 = CPU count")
     parser.add_argument("--image_mode", choices=("symlink", "copy"), default="symlink")
     parser.add_argument("--include_depth", action="store_true", help="Also prepare train2017_depth/val2017_depth PNGs")
+    parser.add_argument("--rotation_mode", choices=("preserve", "check", "normalize"), default="preserve",
+                        help="preserve: unchanged poses; check: reject invalid rotations; normalize: bounded SO(3) projection in NEW output only")
+    parser.add_argument("--rotation_tolerance", type=float, default=DEFAULT_TOLERANCE)
+    parser.add_argument("--rotation_max_change", type=float, default=DEFAULT_MAX_CHANGE,
+                        help="Maximum absolute change to any rotation entry when normalizing (default: 0.02, not an angle)")
     args = vars(parser.parse_args(argv))
     try:
         args["scene_ids"] = _parse_ids(args["scene_ids"])

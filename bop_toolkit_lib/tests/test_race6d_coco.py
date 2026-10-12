@@ -9,6 +9,7 @@ import pytest
 
 from bop_toolkit_lib import pycoco_utils
 from bop_toolkit_lib.race6d_coco import prepare_dataset
+from bop_toolkit_lib.race6d_rotations import rotation_metrics
 
 
 VISIBLE = np.array([[0, 1, 0, 0], [0, 1, 0, 0], [0, 0, 0, 0]], dtype=bool)
@@ -111,6 +112,34 @@ def _load_output(summary):
     return json.loads(Path(summary["annotation_file"]).read_text())
 
 
+def test_per_image_camera_preserved_without_unification(tmp_path):
+    scene = _write_scene(tmp_path, "lmo", "train_pbr", 0, image_ids=(3, 8))
+    path = scene / "scene_camera.json"
+    camera = json.loads(path.read_text())
+    camera["8"]["cam_K"] = [720, 0, -12, 0, 730, 8, 0, 0, 1]
+    _write_json(path, camera)
+    before = path.read_bytes()
+    summary = prepare_dataset(dataset="lmo", dataset_split="train", datasets_path=tmp_path,
+                              output_dir=tmp_path / "coco", rotation_mode="normalize")
+    annotations = _load_output(summary)["annotations"]
+    assert annotations[0]["cam_K"] == CAMERA
+    assert annotations[1]["cam_K"] == camera["8"]["cam_K"]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("matrix", [[0, 0, 2, 0, 510, 1.5, 0, 0, 1],
+                                    [500, 0, 2, 0, -510, 1.5, 0, 0, 1],
+                                    [500, 0, 2, 0, 510, 1.5, 0, 1, 1]])
+def test_invalid_pinhole_camera_refused(tmp_path, matrix):
+    scene = _write_scene(tmp_path, "lmo", "train_pbr", 0, image_ids=(3,))
+    camera = {"3": {"cam_K": matrix}}
+    _write_json(scene / "scene_camera.json", camera)
+    output = tmp_path / "bad"
+    with pytest.raises(ValueError, match="invalid pinhole"):
+        prepare_dataset(dataset="lmo", dataset_split="train", datasets_path=tmp_path, output_dir=output)
+    assert not output.exists()
+
+
 def test_test_targets_complete_layout_and_source_unchanged(tmp_path):
     scene = _write_scene(tmp_path, "lmo", "test", 2)
     target = tmp_path / "lmo" / "test_targets_bop19.json"
@@ -193,6 +222,23 @@ def test_filters_limit_and_missing_inputs(tmp_path):
         prepare_dataset(datasets_path=tmp_path, dataset_split="train", output_dir=tmp_path / "no_train")
 
 
+@pytest.mark.parametrize("dataset,split,name", [("hb", "val_primesense", "hb2coco_val_primesense_amodal"),
+                                                ("itodd", "val", "itodd2coco_val_amodal")])
+def test_val_uses_all_gt_without_target_list(tmp_path, dataset, split, name):
+    gray = dataset == "itodd"
+    _write_scene(tmp_path, dataset, split, 1, image_ids=(3, 8), extension=".tif" if gray else ".png", gray=gray)
+    summary = prepare_dataset(dataset=dataset, dataset_split="val", datasets_path=tmp_path)
+    assert Path(summary["output_dir"]).name == name
+    assert summary["images"] == 2
+    data = _load_output(summary)
+    assert [image["bop_im_id"] for image in data["images"]] == [3, 8]
+    assert Path(summary["annotation_file"]).name == "instances_val2017.json"
+    _write_json(tmp_path / dataset / "val_targets.json", [{"scene_id": 1, "im_id": 8, "obj_id": 5, "inst_count": 1}])
+    listed = prepare_dataset(dataset=dataset, dataset_split="val", datasets_path=tmp_path,
+                             targets_filename="val_targets.json", output_dir=tmp_path / "listed")
+    assert listed["images"] == 1
+
+
 @pytest.mark.parametrize("dataset,split", [("tless", "test_primesense"), ("hb", "test_primesense"), ("itodd", "test")])
 def test_core_sensor_paths_and_grayscale_depth(tmp_path, dataset, split):
     gray = dataset == "itodd"
@@ -204,3 +250,74 @@ def test_core_sensor_paths_and_grayscale_depth(tmp_path, dataset, split):
     with Image.open(Path(summary["depth_dir"]) / "000000.png") as depth:
         assert depth.format == "PNG"
         np.testing.assert_array_equal(np.asarray(depth), np.arange(12).reshape(3, 4) * 100)
+
+
+def test_rotation_modes_preserve_raw_and_fail_check_atomically(tmp_path):
+    scene = _write_scene(tmp_path, "tudl", "train_real", 0, image_ids=(3,))
+    path = scene / "scene_gt.json"
+    gt = json.loads(path.read_text())
+    gt["3"][0]["obj_id"] = 3  # TUD-L categories are 1..3, unlike LM-O.
+    gt["3"][0]["cam_R_m2c"][0] = 0.001
+    _write_json(path, gt)
+    before = path.read_bytes()
+    common = dict(dataset="tudl", dataset_split="train", dataset_split_type="real",
+                  datasets_path=tmp_path)
+    preserved = prepare_dataset(**common, output_dir=tmp_path / "preserved")
+    assert _load_output(preserved)["annotations"][0]["pose"][3:] == gt["3"][0]["cam_R_m2c"]
+    assert preserved["rotations"]["checked"] == 0
+    with pytest.raises(ValueError, match=r"scene_gt.json: image 3 GT 0 object 3.*Invalid rotation"):
+        prepare_dataset(**common, output_dir=tmp_path / "checked", rotation_mode="check")
+    assert not (tmp_path / "checked").exists()
+    assert not list(tmp_path.glob(".checked.tmp-*"))
+    normalized = prepare_dataset(**common, output_dir=tmp_path / "normalized", rotation_mode="normalize")
+    annotation = _load_output(normalized)["annotations"][0]
+    assert annotation["pose"][:3] == POSE[:3]
+    assert rotation_metrics(annotation["pose"][3:])["valid"]
+    changes = [json.loads(line) for line in Path(normalized["rotations"]["changes_file"]).read_text().splitlines()]
+    assert len(changes) == normalized["rotations"]["normalized"] == 1
+    assert changes[0]["original_rotation"] == gt["3"][0]["cam_R_m2c"]
+    assert changes[0]["normalized_rotation"] == annotation["pose"][3:]
+    assert changes[0]["scene_id"] == 0 and changes[0]["gt_id"] == 0
+    assert path.read_bytes() == before
+    for field in ("bbox", "cam_K", "visibility", "full_segmentation", "segmentation"):
+        assert annotation[field] == _load_output(preserved)["annotations"][0][field]
+
+
+def test_rotation_parallel_audit_is_deterministic_and_skips_empty_instances(tmp_path):
+    for scene_id in (0, 1):
+        scene = _write_scene(tmp_path, "ycbv", "train_pbr", scene_id, image_ids=(3,))
+        path = scene / "scene_gt.json"
+        gt = json.loads(path.read_text())
+        gt["3"][0]["cam_R_m2c"][0] = 0.001
+        # Empty-visible instances are not exported or covered by the converter audit.
+        gt["3"][1]["cam_R_m2c"] = [0] * 9
+        _write_json(path, gt)
+    outputs, logs = [], []
+    for workers in (1, 2):
+        result = prepare_dataset(dataset="ycbv", dataset_split="train", datasets_path=tmp_path,
+                                 output_dir=tmp_path / str(workers), num_workers=workers,
+                                 rotation_mode="normalize")
+        assert result["rotations"]["normalized"] == result["rotations"]["checked"] == 2
+        assert len(result["rotations"]["sources"]) == 2
+        data = _load_output(result)
+        data["info"].pop("date_created")
+        outputs.append(data)
+        logs.append(Path(result["rotations"]["changes_file"]).read_bytes())
+    assert outputs[0] == outputs[1] and logs[0] == logs[1]
+
+
+def test_rotation_check_keeps_valid_pose_and_normalize_rejects_reflection(tmp_path):
+    scene = _write_scene(tmp_path, "lmo", "test", 2, image_ids=(3,))
+    result = prepare_dataset(datasets_path=tmp_path, use_all_gt=True,
+                             output_dir=tmp_path / "valid", rotation_mode="check")
+    assert _load_output(result)["annotations"][0]["pose"] == POSE
+    assert result["rotations"]["checked"] == 1
+    assert Path(result["rotations"]["changes_file"]).read_bytes() == b""
+    path = scene / "scene_gt.json"
+    gt = json.loads(path.read_text())
+    gt["3"][0]["cam_R_m2c"] = np.diag([-1., 1., 1.]).reshape(-1).tolist()
+    _write_json(path, gt)
+    with pytest.raises(ValueError, match="reflection"):
+        prepare_dataset(datasets_path=tmp_path, use_all_gt=True,
+                        output_dir=tmp_path / "bad", rotation_mode="normalize")
+    assert not (tmp_path / "bad").exists()
