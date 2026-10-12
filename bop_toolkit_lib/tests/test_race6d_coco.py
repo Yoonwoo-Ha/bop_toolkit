@@ -222,8 +222,8 @@ def test_filters_limit_and_missing_inputs(tmp_path):
         prepare_dataset(datasets_path=tmp_path, dataset_split="train", output_dir=tmp_path / "no_train")
 
 
-@pytest.mark.parametrize("dataset,split,name", [("hb", "val_primesense", "hb2coco_val_primesense_amodal"),
-                                                ("itodd", "val", "itodd2coco_val_amodal")])
+@pytest.mark.parametrize("dataset,split,name", [("hb", "val_primesense", "hb2coco_test_eval_amodal"),
+                                                ("itodd", "val", "itodd2coco_test_eval_amodal")])
 def test_val_uses_all_gt_without_target_list(tmp_path, dataset, split, name):
     gray = dataset == "itodd"
     _write_scene(tmp_path, dataset, split, 1, image_ids=(3, 8), extension=".tif" if gray else ".png", gray=gray)

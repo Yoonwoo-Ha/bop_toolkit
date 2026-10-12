@@ -86,9 +86,9 @@ datasets need a separate conversion.
 
 The official test GT of **HB and ITODD** is not public. Their annotated
 official validation splits (`hb/val_primesense`, `itodd/val`) are the evaluation
-sets during training; they are exported to the same folder name as the test
-evaluation sets of the other datasets (`<dataset>2coco_test_eval_amodal`), which
-the RACE-6D configs read. Test scores come from the BOP server.
+sets during training; `--split val` exports them to the same folder name as the
+test evaluation sets of the other datasets (`<dataset>2coco_test_eval_amodal`),
+which the RACE-6D configs read. Test scores come from the BOP server.
 
 RACE-6D's YAML paths are configured separately; `BOP_PATH` does not rewrite them.
 
@@ -107,8 +107,8 @@ $COCO --dataset tudl  --split test --include_depth
 $COCO --dataset icbin --split test --include_depth
 $COCO --dataset ycbv  --split test --include_depth
 $COCO --dataset tless --split test --split_type primesense --include_depth
-$COCO --dataset hb    --split val  --include_depth --output_dir "$BOP_PATH/hb/hb2coco_test_eval_amodal"
-$COCO --dataset itodd --split val  --output_dir "$BOP_PATH/itodd/itodd2coco_test_eval_amodal"
+$COCO --dataset hb    --split val  --include_depth
+$COCO --dataset itodd --split val
 
 # Training: PBR for all datasets, plus the real training images of TUD-L and YCB-V
 for ds in lmo tudl icbin itodd ycbv tless hb; do
@@ -141,8 +141,8 @@ error instead of rounding it.
 | IC-BIN | `--dataset icbin --split test` | `icbin/test/` | `icbin2coco_test_eval_amodal/` |
 | YCB-V | `--dataset ycbv --split test` | `ycbv/test/` | `ycbv2coco_test_eval_amodal/` |
 | T-LESS | `--dataset tless --split test --split_type primesense` | `tless/test_primesense/` | `tless2coco_test_eval_amodal/` |
-| HB | `--dataset hb --split val --output_dir $BOP_PATH/hb/hb2coco_test_eval_amodal` | `hb/val_primesense/` | (default `hb2coco_val_primesense_amodal/`) |
-| ITODD | `--dataset itodd --split val --output_dir $BOP_PATH/itodd/itodd2coco_test_eval_amodal` | `itodd/val/` | (default `itodd2coco_val_amodal/`) |
+| HB | `--dataset hb --split val` | `hb/val_primesense/` | `hb2coco_test_eval_amodal/` |
+| ITODD | `--dataset itodd --split val` | `itodd/val/` | `itodd2coco_test_eval_amodal/` |
 | PBR (all) | `--dataset <ds> --split train --split_type pbr` | `<ds>/train_pbr/` | `<ds>2coco_train_pbr_amodal/` |
 | TUD-L real | `--dataset tudl --split train --split_type real` | `tudl/train_real/` | `tudl2coco_train_real_amodal/` |
 | YCB-V real | `--dataset ycbv --split train --split_type real` | `ycbv/train_real/` | `ycbv2coco_train_real_amodal/` |
@@ -151,6 +151,7 @@ error instead of rounding it.
 - **test** selects the images listed in `<dataset>/test_targets_bop19.json` and
   keeps every eligible instance in them (`--targets_filename` sets another list).
 - **val** uses every annotated image; BOP validation splits have no target list.
+  Its output is named like a test evaluation export (`<dataset>2coco_test_eval_amodal`).
   `--targets_filename` restricts it to a list.
 - **train** always uses every annotated image present, ordered by the original
   scene/image IDs; it does not assume scenes start at `000001`.

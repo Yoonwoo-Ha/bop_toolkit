@@ -263,7 +263,8 @@ def prepare_dataset(dataset="lmo", dataset_split="test", dataset_split_type=None
     Test uses the target image list (``test_targets_bop19.json`` by default). Val
     uses all GT images unless ``targets_filename`` is given: BOP val splits have
     no target list, and they are the annotated split for datasets whose test GT
-    is not public (HB, ITODD). Train always uses all available GT images.
+    is not public (HB, ITODD). A val export is named like a test evaluation export
+    (``<dataset>2coco_test_eval_<bbox>``). Train always uses all available GT images.
     ``image_ids`` filters original BOP image IDs in every selected scene.
     Existing output directories are always refused, including empty directories.
     Rotation checks apply to exported annotations, not empty/excluded instances.
@@ -317,7 +318,11 @@ def prepare_dataset(dataset="lmo", dataset_split="test", dataset_split_type=None
         raise ValueError("No scenes selected from {}".format(split_path))
     selected_images = set(image_ids) if image_ids is not None else None
     coco_split = "train2017" if dataset_split == "train" else "val2017"
-    split_label = split_path.name if all_gt else dataset_split + "_eval"
+    if dataset_split == "val":
+        # The evaluation set of datasets without public test GT (HB, ITODD): same name as a test evaluation export
+        split_label = "test_eval"
+    else:
+        split_label = split_path.name if all_gt else dataset_split + "_eval"
     default_name = "{}2coco_{}_{}".format(dataset, split_label, bbox_type)
     output = (Path(output_dir).expanduser() if output_dir is not None
               else Path(dp_split["base_path"]) / default_name).absolute()
