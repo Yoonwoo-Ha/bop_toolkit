@@ -29,8 +29,8 @@ the package:
 
 ```bash
 git clone --branch race6d-data https://github.com/Yoonwoo-Ha/bop_toolkit.git \
-  "$HOME/Downloads/bop_toolkit_race6d"
-cd "$HOME/Downloads/bop_toolkit_race6d"
+  "$HOME/Downloads/bop_toolkit"
+cd "$HOME/Downloads/bop_toolkit"
 python3.10 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
